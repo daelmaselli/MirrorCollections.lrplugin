@@ -1,0 +1,200 @@
+local LrTasks = import 'LrTasks'
+local LrDate = import 'LrDate'
+local LrLogger = import 'LrLogger'
+local LrFileUtils = import 'LrFileUtils'
+local LrApplication = import 'LrApplication'
+local LrApplicationView = import 'LrApplicationView'
+local LrProgressScope = import 'LrProgressScope'
+local logger = LrLogger( 'CopyCollection' )
+
+local prefs = import 'LrPrefs'.prefsForPlugin()
+local catalog = LrApplication.activeCatalog()
+
+
+logger:enable( "logfile" ) -- Pass either a string or a table of actions.
+
+local function log( message )
+   logger:trace( message )
+end
+
+log('Starting')
+
+
+p2cmap = prefs.p2cmap
+if p2cmap == nil then
+   p2cmap = {}
+end
+
+p2cmapcount = 0
+for _ in pairs(p2cmap) do p2cmapcount = p2cmapcount + 1 end
+
+prtotal = p2cmapcount + 2
+prdone  = 0
+
+log( 'progresstodo:'..prtotal )
+
+collOk = {}
+
+function getCollectionSon(parent, l, psparent)
+
+   for i,v in ipairs(parent:getChildCollections()) do
+      log( '  '..v:getName()..' id:'..v.localIdentifier )
+
+      catalog:withWriteAccessDo("Create Mirrored Collection", function()
+				   newps = psserv:createPublishedCollection( v:getName(), psparent, true )
+      end)
+      collOk[newps.localIdentifier] = newps:getName()
+      p2cmap[newps.localIdentifier] = v.localIdentifier
+
+      catalog:withWriteAccessDo("Refreshing Photos", function()
+				   --log( 'Removing photos...'..v:getName() )
+				   newps:removeAllPhotos()
+				   --log( 'Adding photos...'..v:getName() )
+				   newps:addPhotos( v:getPhotos() )
+      end)
+
+      prdone = prdone + 1
+      progress:setPortionComplete( prdone, prtotal )
+
+   end
+
+   for i,v in ipairs(parent:getChildCollectionSets()) do
+      log( v:getName() )
+
+      catalog:withWriteAccessDo("Create Mirrored Collection", function()
+				   newps = psserv:createPublishedCollectionSet( v:getName(), psparent, true )
+      end)
+      collOk[newps.localIdentifier] = newps:getName()
+      p2cmap[newps.localIdentifier] = v.localIdentifier
+      getCollectionSon( v, (l+1), newps )
+
+      prdone = prdone + 1
+      progress:setPortionComplete( prdone, prtotal )
+
+   end
+   
+end
+
+
+function flushPCollections(parent)
+
+   for i,v in ipairs(parent:getChildCollections()) do
+      if collOk[v.localIdentifier] == nil then
+	 
+	 log( 'DELETING  '..v:getName()..' id:'..v.localIdentifier )
+	 local info = {
+
+	    name = v:getName(),
+
+	    parents = {
+	       localCollectionId = parent.localIdentifier,
+	       name = parent:getName(),
+	       remoteCollectionId = parent:getRemoteId()
+	    },
+	    
+	    publishService = psserv,
+	    publishedCollection = v,
+	    remoteId = v:getRemoteId()
+	    
+	 }
+	 publishServiceProvider.deletePublishedCollection( psserv:getPublishSettings(), info )
+
+	 v:delete()
+
+      end      
+   end
+   
+   for i,v in ipairs(parent:getChildCollectionSets()) do
+      if collOk[v.localIdentifier] == nil then
+	 log( 'DELETING '..v:getName()..' id:'..v.localIdentifier )
+	 v:delete()
+      end
+      flushPCollections( v )
+   end
+
+end
+
+
+
+function refreshCollections()
+
+   -- Rinomina PubCollection
+   for i,v in pairs(p2cmap) do
+      c = catalog:getCollectionByLocalIdentifier( v )
+      p = catalog:getPublishedCollectionByLocalIdentifier( i )
+      if c and p then
+	 --log( 'map p:'..i..'name:'..p:getName()..'  c:'..v..'name:'..c:getName() )
+	 if p:getName() ~= c:getName() then
+	    p:setName( c:getName() )
+	 end
+      end
+   end
+
+   -- Crea nuovi Sets
+
+
+   -- Cambia padre
+
+   
+   -- Cancella non esistenti
+
+   
+end
+
+
+
+function string.starts(String,Start)
+   return string.sub(String,1,string.len(Start))==Start
+end
+
+
+function runCommand ()
+   LrTasks.startAsyncTask(function()
+
+	 progress = LrProgressScope({
+	       title = "Mirroring Collections",
+	 })
+
+	 progress:setCancelable(false)
+	 
+	 for i,ps in ipairs(catalog:getPublishServices()) do
+	    log( ps:getName() )
+	    if string.starts( ps:getName(), "MIRROR") then
+	       psserv = ps
+	       break
+	    end
+	 end
+	 if psserv ~= nil then
+
+	    log('publish service: '..psserv:getName())
+	    for i,v in pairs( psserv ) do
+	       log( i..':'..v )
+	    end
+	    
+	    if prefs.p2cmap ~= nil then
+	       catalog:withWriteAccessDo("Refresh Mirrored Collection", function()
+					    refreshCollections()
+	       end)
+	    end
+
+	    prdone = prdone + 1
+	    progress:setPortionComplete( prdone, prtotal )
+	    
+	    getCollectionSon( catalog, 0, psserv )
+
+	    prdone = prdone + 1
+	    progress:setPortionComplete( prdone, prtotal )
+	    catalog:withWriteAccessDo("Delete missing Mirrored Collection", function()
+					 flushPCollections( psserv )
+	    end)
+
+	 end
+
+	 prefs.p2cmap = p2cmap
+	 progress:done()
+	 
+	 
+   end )
+end
+
+runCommand()
